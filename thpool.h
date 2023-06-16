@@ -10,14 +10,6 @@
 #define DISABLE_PRINT
 
 #include <pthread.h>
-#ifdef LINUX
-#include <unistd.h>
-#endif
-
-#ifdef WIN64
-#define sleep _sleep
-#else
-#endif
 
 #ifdef __cplusplus
 extern "C" {

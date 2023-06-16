@@ -20,6 +20,20 @@
 #define _POSIX_C_SOURCE 200809L
 #define DISABLE_PRINT
 
+#ifdef LINUX
+#include <unistd.h>
+#include <time.h>
+#elif WIN64
+#include <synchapi.h>
+#endif
+#ifdef LINUX
+#define DO_SLEEP0ms nanosleep((const struct timespec[]){{0, 100L}}, NULL);
+#define DO_SLEEP1ms nanosleep((const struct timespec[]){{0, 1000000L}}, NULL);
+#else
+#define DO_SLEEP0ms Sleep(0);
+#define DO_SLEEP1ms Sleep(1);
+#endif
+
 #ifdef THPOOL_DEBUG
 #define THPOOL_DEBUG 1
 #else
@@ -288,11 +302,7 @@ void thpool_destroy(thpool_* thpool_p){
 	/* Poll remaining threads */
 	while (thpool_p->num_threads_alive){
 		bsem_post_all(thpool_p->jobqueue.has_jobs);
-		#ifdef LINUX
-		sleep(1);
-		#else
-		_sleep(1);
-		#endif
+		DO_SLEEP1ms;
 	}
 
 	/* Job queue cleanup */
@@ -427,6 +437,8 @@ static void* thread_do(void * p0){
 				pthread_cond_signal(&thpool_p->threads_all_idle);
 			}
 			pthread_mutex_unlock(&thpool_p->thcount_lock);
+
+            DO_SLEEP0ms;
 		}
 	}
 	pthread_mutex_lock(&thpool_p->thcount_lock);

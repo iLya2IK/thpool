@@ -1,0 +1,12 @@
+# depslib dependency file v1.0
+1686894886 source:c:\projects\thpool\thpool.cpp
+	"thpool.h"
+	<exception>
+	<string>
+
+1686894513 c:\projects\thpool\thpool.h
+	<pthread.h>
+	<unistd.h>
+	<time.h>
+	<synchapi.h>
+
