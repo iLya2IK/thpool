@@ -27,11 +27,13 @@
 #include <synchapi.h>
 #endif
 #ifdef LINUX
-#define DO_SLEEP0ms nanosleep((const struct timespec[]){{0, 100L}}, NULL);
-#define DO_SLEEP1ms nanosleep((const struct timespec[]){{0, 1000000L}}, NULL);
+#include <sched.h>
+#include <cpuid.h>
+#define DO_SLEEP0ms nanosleep((const struct timespec[]){{0, 100L}}, NULL)
+#define DO_SLEEP1ms nanosleep((const struct timespec[]){{0, 1000000L}}, NULL)
 #else
-#define DO_SLEEP0ms Sleep(0);
-#define DO_SLEEP1ms Sleep(1);
+#define DO_SLEEP0ms Sleep(0)
+#define DO_SLEEP1ms Sleep(1)
 #endif
 
 #ifdef THPOOL_DEBUG
@@ -123,7 +125,7 @@ typedef struct thpool_{
 
 /* ========================== PROTOTYPES ============================ */
 
-static int   thread_init(thpool_* thpool_p, struct thread** thread_p, int id);
+static int   thread_init(thpool_* thpool_p, struct thread** thread_p, int id, int preffed_cpu);
 static void* thread_do(void* thread_p);
 static void  thread_hold(int sig_id);
 static void  thread_destroy(struct thread* thread_p);
@@ -151,6 +153,18 @@ static void  dec_bsem_wait(struct bsem *bsem_p);
 
 
 /* ========================== THREADPOOL ===ifdef========================= */
+
+int nprocs()
+{
+#ifdef LINUX
+  cpu_set_t cs;
+  CPU_ZERO(&cs);
+  sched_getaffinity(0, sizeof(cs), &cs);
+  return CPU_COUNT(&cs);
+#else
+  return 1;
+#endif
+}
 
 
 /* Initialise thread pool */
@@ -195,10 +209,15 @@ struct thpool_* thpool_init(int num_threads){
 	thpool_p->thcount_lock_inzed = pthread_mutex_init(&(thpool_p->thcount_lock), NULL) == 0;
 	thpool_p->threads_all_idle_inzed = pthread_cond_init(&thpool_p->threads_all_idle, NULL) == 0;
 
+
+    int n_of_threads = nprocs();
 	/* Thread init */
 	int n;
+	int k = 0;
 	for (n=0; n<num_threads; n++){
-		thread_init(thpool_p, &thpool_p->threads[n], n);
+		thread_init(thpool_p, &thpool_p->threads[n], n, k);
+		k++;
+		if (k >= n_of_threads) k = 0;
 #if THPOOL_DEBUG
 			AddLog("THPOOL_DEBUG: Created thread %d in pool \n", n);
 #endif
@@ -263,6 +282,7 @@ void thpool_wait(thpool_* thpool_p){
 	pthread_mutex_lock(&thpool_p->thcount_lock);
 	while (thpool_p->jobqueue.len || thpool_p->num_threads_working) {
 		pthread_cond_wait(&thpool_p->threads_all_idle, &thpool_p->thcount_lock);
+		DO_SLEEP0ms;
 	}
 	pthread_mutex_unlock(&thpool_p->thcount_lock);
 }
@@ -340,13 +360,30 @@ int thpool_num_threads_working(thpool_* thpool_p){
 /* ============================ THREAD ============================== */
 
 
+int stick_this_thread_to_core(pthread_t thread_p, int core_id) {
+#ifdef LINUX
+   int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
+   if (core_id < 0 || core_id >= num_cores)
+      return EINVAL;
+
+   cpu_set_t cpuset;
+   CPU_ZERO(&cpuset);
+   CPU_SET(core_id, &cpuset);
+
+   return pthread_setaffinity_np(thread_p, sizeof(cpu_set_t), &cpuset);
+#else
+   return 0;
+#endif // LINUX
+}
+
 /* Initialize a thread in the thread pool
  *
  * @param thread        address to the pointer of the thread to be created
  * @param id            id to be given to the thread
+ * @preffed_cpu         preffered cpu num (-1 if not preffered)
  * @return 0 on success, -1 otherwise.
  */
-static int thread_init (thpool_* thpool_p, struct thread** thread_p, int id){
+static int thread_init (thpool_* thpool_p, struct thread** thread_p, int id, int preffed_cpu){
 
 	*thread_p = (struct thread*)malloc(sizeof(struct thread));
 	if (thread_p == NULL){
@@ -358,6 +395,9 @@ static int thread_init (thpool_* thpool_p, struct thread** thread_p, int id){
 	(*thread_p)->id             = id;
 
 	pthread_create(&(*thread_p)->pthread, NULL, thread_do, (*thread_p));
+	if (preffed_cpu >= 0) {
+        stick_this_thread_to_core((*thread_p)->pthread, preffed_cpu);
+	}
 	pthread_detach((*thread_p)->pthread);
 	return 0;
 }
@@ -384,7 +424,7 @@ static void thread_hold(int sig_id) {
 static void* thread_do(void * p0){
 	struct thread* thread_p = (struct thread*)p0;
 	/* Set thread name for profiling and debuging */
-	char thread_name[128] = {0};
+	//char thread_name[128] = {0};
 	//AddLog(thread_name, "thread-pool-%d", thread_p->id);
 
 #if defined(__linux__)
@@ -513,7 +553,7 @@ static void jobqueue_push(jobqueue* jobqueue_p, struct job* newjob){
 	}
 	jobqueue_p->len++;
 
-	bsem_post(jobqueue_p->has_jobs);
+	bsem_post_all(jobqueue_p->has_jobs);
 	pthread_mutex_unlock(&jobqueue_p->rwmutex);
 }
 
@@ -544,9 +584,16 @@ static struct job* jobqueue_pull(jobqueue* jobqueue_p){
 		default: /* if >1 jobs in queue */
 					jobqueue_p->front = job_p->prev;
 					jobqueue_p->len--;
-					/* more than one job in queue -> post it */
-					bsem_post(jobqueue_p->has_jobs);
 
+	}
+
+	if (jobqueue_p->len == 0) {
+        pthread_mutex_lock(&jobqueue_p->has_jobs->mutex);
+        jobqueue_p->has_jobs->v = 0;
+        pthread_mutex_unlock(&jobqueue_p->has_jobs->mutex);
+	} else {
+        /* more than one job in queue -> post it */
+		bsem_post_all(jobqueue_p->has_jobs);
 	}
 
 	pthread_mutex_unlock(&jobqueue_p->rwmutex);
@@ -610,7 +657,7 @@ static void bsem_wait(bsem* bsem_p) {
 	while (bsem_p->v != 1) {
 		pthread_cond_wait(&bsem_p->cond, &bsem_p->mutex);
 	}
-	bsem_p->v = 0;
+	// bsem_p->v = 0;
 	pthread_mutex_unlock(&bsem_p->mutex);
 }
 

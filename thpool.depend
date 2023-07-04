@@ -10,3 +10,17 @@
 	<time.h>
 	<synchapi.h>
 
+1687242046 source:/home/ilya/projects/thpool/thpool.cpp
+	"thpool.h"
+	<exception>
+	<string>
+	<unistd.h>
+	<time.h>
+	<synchapi.h>
+
+1687240974 /home/ilya/projects/thpool/thpool.h
+	<pthread.h>
+	<sched.h>
+	<cpuid.h>
+	<sys/sysinfo.h>
+
